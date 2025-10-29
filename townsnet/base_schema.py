@@ -1,4 +1,4 @@
-import pandera as pa
+import pandera.pandas as pa
 import geopandas as gpd
 from shapely import Point, MultiPoint, Polygon, MultiPolygon, LineString, MultiLineString
 from pandera.typing import Series, Index

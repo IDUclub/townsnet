@@ -1,6 +1,6 @@
 import geopandas as gpd
 import pandas as pd
-import pandera as pa
+import pandera.pandas as pa
 from shapely import Polygon, MultiPolygon, Point
 from pandera.typing import Index, Series
 from .service_type import ServiceType, AccessibilityType
