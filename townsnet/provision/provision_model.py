@@ -1,7 +1,7 @@
 import math
 import geopandas as gpd
 import pandas as pd
-import pandera as pa
+import pandera.pandas as pa
 from loguru import logger
 from pandera.typing import Index, Series
 from pulp import PULP_CBC_CMD, LpMaximize, LpProblem, LpVariable, lpSum, LpInteger

@@ -1,4 +1,4 @@
-import pandera as pa
+import pandera.pandas as pa
 import geopandas as gpd
 from enum import Enum
 from shapely import Point
