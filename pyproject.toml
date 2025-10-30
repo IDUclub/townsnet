@@ -1,10 +1,10 @@
 [build-system]
-requires = ["setuptools>=64.0"]
+requires = ["setuptools>=64.0", "setuptools_scm[toml]>=8.0"]
 build-backend = "setuptools.build_meta"
 
 [project]
 name = "townsnet"
-version = "0.0.10"
+dynamic = ["version"]
 authors = [
     { name = "Vasilii Starikov", email = "vasilstar97@gmail.com" }, # TODO add authors
 ]
@@ -38,6 +38,9 @@ classifiers = [
 [tool.setuptools.packages.find]
 include = ["townsnet*"]
 
+[tool.setuptools_scm]
+version_scheme = "post-release"
+local_scheme = "no-local-version"
 
 [project.optional-dependencies]
 dev = [
