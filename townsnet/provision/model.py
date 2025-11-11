@@ -547,12 +547,13 @@ class UrbanFunctionCalculator:
                 external = aligned["demand_without"]
 
                 mask = demand > 0
-                provision_pct = pd.Series(np.nan, index=city_ids, dtype=float)
+                # Default to 0.0 so missing demand doesn't produce NaN -> null in JSON
+                provision_pct = pd.Series(0.0, index=city_ids, dtype=float)
                 provision_pct.loc[mask] = (
                     (served.loc[mask] / demand.loc[mask]).clip(0.0, 1.0) * 100.0
                 )
 
-                external_pct = pd.Series(np.nan, index=city_ids, dtype=float)
+                external_pct = pd.Series(0.0, index=city_ids, dtype=float)
                 external_pct.loc[mask] = (
                     (external.loc[mask] / demand.loc[mask]).clip(lower=0.0) * 100.0
                 )
@@ -613,6 +614,8 @@ class UrbanFunctionCalculator:
         ).set_index("city_id")
 
         if not has_data:
+            # No underlying services matched this group; treat as zeros so
+            # the group participates in averages instead of being skipped.
             result.loc[
                 :,
                 [
@@ -624,7 +627,7 @@ class UrbanFunctionCalculator:
                     "external_pct",
                     "capacity_used",
                 ],
-            ] = np.nan
+            ] = 0.0
             return result
 
         mask = demand > 0
@@ -741,10 +744,12 @@ class UrbanFunctionCalculator:
                         external_demand = _as_optional_float(metrics.get("external_demand"))
                         external_pct = _as_optional_float(metrics.get("external_pct"))
                     else:
-                        provision_pct = None
-                        served_population = None
-                        external_demand = None
-                        external_pct = None
+                        # If service metrics are missing for this city, use zeros so
+                        # the UI shows 0 instead of null and averages include it.
+                        provision_pct = 0.0
+                        served_population = 0.0
+                        external_demand = 0.0
+                        external_pct = 0.0
 
                     service_provision[service_name] = {
                         "Обеспеченность, %": _round_optional(provision_pct),
