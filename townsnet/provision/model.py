@@ -23,7 +23,6 @@ def _normalize_service_key(value: str) -> str:
     normalized = re.sub(r"\s+", " ", normalized)
     return normalized
 
-
 SERVICE_ID_TO_NAME: Dict[int, str] = {
     1: "Парк",
     21: "Детский сад",
@@ -273,8 +272,32 @@ class UrbanFunctionCalculator:
     service_aggregates: Dict[str, pd.DataFrame] = field(default_factory=dict, init=False)
     city_json: Dict[int, Dict[str, object]] = field(default_factory=dict, init=False)
 
+    # ML-related caches (optional; populated by compute_ml_features)
+    ml_features: Optional[pd.DataFrame] = field(default=None, init=False)
+    ml_models: Dict[str, object] = field(default_factory=dict, init=False)
+
     _service_results_lower: Dict[str, pd.DataFrame] = field(default_factory=dict, init=False, repr=False)
     _external_supply_total: Optional[pd.Series] = field(default=None, init=False, repr=False)
+
+    # ------------------------------------------------------------------ #
+    # Get data
+    # ------------------------------------------------------------------ #
+
+    def get_profilies(self) -> gpd.GeoDataFrame:
+        rows = []
+        for cid, prof in self.city_json.items():
+            rows.append({"city_id": int(cid), **prof})
+        df = pd.DataFrame(rows, index=self.city_info.index)
+        keys = ["city_id", "Название", "Население", "Опорный пункт", "Потенциальный опорный пункт", "Лучшая градообразующая функция", "Лучшая градообразующая функция, чел", "geometry"]
+        df_small = df[keys].copy()
+
+        gdf = gpd.GeoDataFrame(
+            df_small,
+            geometry='geometry',
+            crs="EPSG:4326",
+            index=self.city_info.index,
+        )
+        return gdf
 
     # ------------------------------------------------------------------ #
     # Data loading
@@ -291,7 +314,7 @@ class UrbanFunctionCalculator:
             raise ValueError("City info table is empty.")
         
         data = GeoDfSchema.validate(data)
-        prepared = pd.DataFrame(index=data.index)
+        prepared = gpd.GeoDataFrame(index=data.index, geometry=data['geometry'], crs=data.crs)
         prepared["city_name"] = data["name"].astype(str)
         prepared["is_anchor"] = data["is_city"].astype(bool)
         prepared["population"] = _ensure_numeric(data["population"]).fillna(0.0)
@@ -364,8 +387,34 @@ class UrbanFunctionCalculator:
     # Aggregation & export
     # ------------------------------------------------------------------ #
 
-    def build_profiles(self) -> Dict[int, Dict[str, object]]:
-        """Group services, compute metrics, and build JSON profiles."""
+    def build_profiles(self, min_export_threshold: int = 0) -> Dict[int, Dict[str, object]]:
+        """
+        Aggregate service-level results into grouped city profiles with urban function metrics.
+
+        This method performs the full pipeline:
+        - Groups individual services into thematic categories (e.g., Education, Healthcare)
+        - Computes aggregated metrics per group and service
+        - Calculates key urban functions:
+            * City self-sufficiency (градообслуживающая функция)
+            * Service export to other cities (градообразующая функция)
+        - Identifies best-performing groups in both dimensions
+        - Flags potential anchor cities based on service export above the threshold
+        - Assembles a structured JSON-ready dictionary of city profiles
+
+        Args:
+            min_export_threshold (int): Minimum number of people served from other cities 
+                                    required to classify a non-anchor city as a 
+                                    potential anchor point. Default is 0.
+
+        Returns:
+            Dict[int, Dict[str, object]]: A dictionary mapping city IDs to their complete 
+                                        profiles containing demographic data, provision 
+                                        metrics, best-performing functions, and classification.
+
+        Raises:
+            RuntimeError: If city info or service results have not been loaded prior to calling.
+            RuntimeError: If none of the configured service groups match available data.
+        """
         if self.city_info is None:
             raise RuntimeError("City info is not loaded.")
         if not self.service_results:
@@ -390,8 +439,109 @@ class UrbanFunctionCalculator:
         self.group_aggregates = aggregates
         self.service_aggregates = self._build_service_metrics()
         self._external_supply_total = external_supply
-        self.city_json = self._assemble_city_json()
+        self.city_json = self._assemble_city_json(min_export_threshold=min_export_threshold)
         return self.city_json
+
+    # ------------------------------------------------------------------ #
+    # ML features (optional)
+    # ------------------------------------------------------------------ #
+
+    def _build_city_feature_matrix(self) -> pd.DataFrame:
+        """Assemble wide city x service feature matrix for ML.
+
+        Uses per-service aggregates: for each service, takes provision_pct and external_pct.
+        Missing values are filled with 0.0 and rows are aligned to city_info index.
+        """
+        if self.city_info is None:
+            raise RuntimeError("City info is not loaded.")
+
+        if not self.service_aggregates:
+            # Ensure service metrics are available
+            self.service_aggregates = self._build_service_metrics()
+
+        parts: List[pd.DataFrame] = []
+        for service_name, df in self.service_aggregates.items():
+            sub = pd.DataFrame(
+                {
+                    f"{service_name}__provision_pct": pd.to_numeric(df["provision_pct"], errors="coerce"),
+                    f"{service_name}__external_pct": pd.to_numeric(df["external_pct"], errors="coerce"),
+                },
+                index=df.index,
+            )
+            parts.append(sub)
+
+        if not parts:
+            raise RuntimeError("No service aggregates available to build ML features.")
+
+        features = pd.concat(parts, axis=1).reindex(self.city_info.index).fillna(0.0)
+        return features
+
+    def compute_ml_features(
+        self,
+        *,
+        n_clusters: int = 5,
+        components: int = 2,
+        with_anomaly: bool = True,
+        random_state: int = 0,
+    ) -> pd.DataFrame:
+        """Compute optional ML features per city.
+
+        - Standardizes features and applies PCA to get embeddings (pca1..pcaN).
+        - Builds a composite index from PC1 scaled to [0, 100].
+        - Clusters cities with KMeans (cluster labels as ints).
+        - Optionally, scores anomalies via IsolationForest (higher = more anomalous).
+
+        Returns the features DataFrame and stores it in self.ml_features.
+        """
+        try:
+            from sklearn.decomposition import PCA
+            from sklearn.cluster import KMeans
+            from sklearn.preprocessing import StandardScaler
+            from sklearn.ensemble import IsolationForest
+            import numpy as _np  # type: ignore
+        except Exception as exc:
+            raise RuntimeError(
+                "scikit-learn is required for ML features (pip install scikit-learn)."
+            ) from exc
+
+        X = self._build_city_feature_matrix()
+        X = pd.concat([X, self.city_info['population']], axis=1)
+        self.X = X
+        if X.shape[0] < 2 or X.shape[1] < 2:
+            raise RuntimeError("Not enough data to compute ML features.")
+
+        scaler = StandardScaler()
+        Z = scaler.fit_transform(X.values)
+        self.Z = Z
+
+        n_comp = int(max(1, min(int(components), X.shape[1])))
+        pca = PCA(n_components=n_comp, random_state=random_state)
+        emb = pca.fit_transform(Z)
+
+        pca_cols = [f"pca{i+1}" for i in range(n_comp)]
+        df_ml = pd.DataFrame(emb, index=X.index, columns=pca_cols)
+
+        pc1 = df_ml[pca_cols[0]].values
+        pc1_min = float(_np.min(pc1))
+        pc1_ptp = float(_np.ptp(pc1)) if float(_np.ptp(pc1)) > 0 else 1.0
+        df_ml["index"] = (pc1 - pc1_min) / pc1_ptp * 100.0
+
+        km = KMeans(n_clusters=int(max(2, n_clusters)), n_init=10, random_state=random_state)
+        clusters = km.fit_predict(Z)
+        df_ml["cluster"] = clusters.astype(int)
+
+        models: Dict[str, object] = {"scaler": scaler, "pca": pca, "kmeans": km}
+
+        if with_anomaly and X.shape[0] >= 10:
+            iso = IsolationForest(random_state=random_state, contamination="auto")
+            iso.fit(Z)
+            # decision_function: higher -> more normal, lower -> more anomalous; invert
+            df_ml["anomaly_score"] = (-iso.decision_function(Z)).astype(float)
+            models["isolation_forest"] = iso
+
+        self.ml_features = pd.concat([self.city_info, df_ml], axis=1)
+        self.ml_models = models
+        return df_ml
 
     def save_city_json(self, path: Union[str, Path], *, by: str = "id") -> None:
         """Save the assembled profiles to disk."""
@@ -584,6 +734,7 @@ class UrbanFunctionCalculator:
         served = pd.Series(0.0, index=city_ids, dtype=float)
         external_demand = pd.Series(0.0, index=city_ids, dtype=float)
         capacity_used = pd.Series(0.0, index=city_ids, dtype=float)
+        supplied_to_others_group = pd.Series(0.0, index=city_ids, dtype=float)
         has_data = False
 
         for service_name in service_names:
@@ -600,8 +751,25 @@ class UrbanFunctionCalculator:
             used_capacity = aligned["capacity"] - aligned["capacity_left"]
             capacity_used += used_capacity
 
-            supplied_to_others = (used_capacity - aligned["demand_within"]).clip(lower=0.0)
+            # --- новая логика обеспечения других городов ---
+            capacity_after_self = aligned["capacity"] - aligned["demand"]
+
+            # город может обеспечить других (есть запас)
+            can_supply = capacity_after_self > 0
+
+            # и реально обеспечивает (остаток меньше потенциального запаса)
+            actually_supplies = aligned["capacity_left"] < capacity_after_self
+
+            mask = can_supply & actually_supplies
+
+            supplied_to_others = pd.Series(0.0, index=aligned.index, dtype=float)
+            supplied_to_others[mask] = (
+                capacity_after_self[mask] - aligned.loc[mask, "capacity_left"]
+            ).clip(lower=0.0)
+
+            supplied_to_others_group += supplied_to_others
             external_supply_acc += supplied_to_others
+
 
         result = pd.DataFrame(
             {
@@ -610,6 +778,7 @@ class UrbanFunctionCalculator:
                 "demand": demand,
                 "served": served,
                 "external_demand": external_demand,
+                "supplied_to_others": supplied_to_others_group,
             }
         ).set_index("city_id")
 
@@ -646,7 +815,7 @@ class UrbanFunctionCalculator:
         result["capacity_used"] = capacity_used
         return result
 
-    def _assemble_city_json(self) -> Dict[int, Dict[str, object]]:
+    def _assemble_city_json(self, min_export_threshold: int = 0) -> Dict[int, Dict[str, object]]:
         if self.city_info is None:
             raise RuntimeError("City info is not loaded.")
         if not self.group_aggregates:
@@ -673,7 +842,7 @@ class UrbanFunctionCalculator:
         def _round_optional(value: Optional[float], digits: int = 2) -> Optional[float]:
             if value is None:
                 return None
-            return round(value, digits)
+            return round(float(value), digits)
 
         def _int_optional(value: Optional[float]) -> Optional[int]:
             if value is None:
@@ -702,6 +871,7 @@ class UrbanFunctionCalculator:
                     served_population = _as_optional_float(metrics.get("served_population"))
                     external_demand = _as_optional_float(metrics.get("external_demand"))
                     external_pct = _as_optional_float(metrics.get("external_pct"))
+                    supplied_to_others = _as_optional_float(metrics.get("supplied_to_others"))
                 else:
                     provision_pct = None
                     served_population = None
@@ -713,14 +883,13 @@ class UrbanFunctionCalculator:
                     "Обслуженное население": _int_optional(served_population),
                 }
                 group_mobility[group_name] = {
-                    "Внешний спрос": _round_optional(external_demand),
-                    "Доля внешнего спроса, %": _round_optional(external_pct),
+                    "Обслуженное население": _round_optional(supplied_to_others),
                 }
 
-                if external_demand is not None and external_demand > 0:
+                if supplied_to_others is not None and supplied_to_others > 0:
                     has_mobility_group = True
-                    if external_pct is not None and (external_pct > top_mobility_value or top_mobility_group is None):
-                        top_mobility_value = external_pct
+                    if supplied_to_others > top_mobility_value or top_mobility_group is None:
+                        top_mobility_value = supplied_to_others
                         top_mobility_group = group_name
 
                 if served_population is not None and served_population > 0:
@@ -755,9 +924,18 @@ class UrbanFunctionCalculator:
                         "Обеспеченность, %": _round_optional(provision_pct),
                         "Обслуженное население": _int_optional(served_population),
                     }
+                    service_frame = self._get_service_frame(service_name)
+                    if service_frame is not None and city_id in service_frame.index:
+                        row = service_frame.loc[city_id]
+                        capacity_after_self = row["capacity"] - row["demand"]
+                        can_supply = capacity_after_self > 0
+                        actually_supplies = row["capacity_left"] < capacity_after_self
+                        export_value = max(0.0, capacity_after_self - row["capacity_left"]) if (can_supply and actually_supplies) else 0.0
+                    else:
+                        export_value = 0.0
+
                     service_mobility[service_name] = {
-                        "Внешний спрос": _round_optional(external_demand),
-                        "Доля внешнего спроса, %": _round_optional(external_pct),
+                        "Обслуженное население": _round_optional(export_value)
                     }
 
             best_provision = _round_optional(top_value) if has_served_group else None
@@ -768,23 +946,54 @@ class UrbanFunctionCalculator:
 
             population = int(round(float(city_row.get("population", 0.0) or 0.0)))
             is_anchor = bool(city_row.get("is_anchor", False))
-            potential_anchor = bool(not is_anchor and external_supply.get(city_id, 0.0) > 0.0)
+            # Город считается потенциальным опорным, только если:
+            #   - он сам не помечен как опорный;
+            #   - он действительно обслуживает другие города (есть внешний объём);
+            #   - у него есть хотя бы одна группа, где обслуживается своё население.
+            potential_anchor = bool(
+                (not is_anchor)
+                and external_supply.get(city_id, 0.0) > min_export_threshold
+                and has_served_group
+            )
+            geometry = city_row.get("geometry")
 
             profiles[int(city_id)] = {
                 "Название": str(city_row.get("city_name", city_id)),
-                "Опорный город": is_anchor,
+                "geometry": geometry,
+                "Опорный пункт": is_anchor,
                 "Потенциальный опорный пункт": potential_anchor,
                 "Население": population,
                 "Лучшая обеспеченность, %": best_provision,
-                "Сервисы: обеспеченность": service_provision,
-                "Сервисы: мобильность": service_mobility,
+                "Сервисы: градообслуживающая функция": service_provision,
+                "Сервисы: градообразующая функция": service_mobility,
                 "Градообслуживающие функции": group_provision,
                 "Градообразующие функции": group_mobility,
                 "Лучшая градообслуживающая функция": best_group,
                 "Лучшая градообслуживающая функция, %": best_provision,
                 "Лучшая градообразующая функция": best_mobility_group,
-                "Лучшая градообразующая функция, %": best_mobility_pct,
+                "Лучшая градообразующая функция, чел": _round_optional(top_mobility_value),
             }
+
+        # Attach optional ML block per city if available
+        if getattr(self, "ml_features", None) is not None:
+            try:
+                ml_index = set(self.ml_features.index)  # type: ignore[union-attr]
+            except Exception:
+                ml_index = set()
+            for cid in list(profiles.keys()):
+                if cid in ml_index:  # type: ignore[operator]
+                    row = self.ml_features.loc[cid]  # type: ignore[index]
+                    ml_block: Dict[str, object] = {
+                        "cluster": int(row.get("cluster")) if "cluster" in row else None,
+                        "index": float(row.get("index")) if "index" in row else None,
+                        "embedding": [
+                            float(row.get("pca1")) if "pca1" in row else None,
+                            float(row.get("pca2")) if "pca2" in row else None,
+                        ],
+                    }
+                    if "anomaly_score" in row:
+                        ml_block["anomaly"] = float(row.get("anomaly_score"))
+                    profiles[cid]["ML"] = ml_block
 
         return profiles
 
