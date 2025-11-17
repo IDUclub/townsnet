@@ -447,10 +447,8 @@ class UrbanFunctionCalculator:
     # ------------------------------------------------------------------ #
 
     def _build_city_feature_matrix(self) -> pd.DataFrame:
-        """Assemble wide city x service feature matrix for ML.
-
-        Uses per-service aggregates: for each service, takes provision_pct and external_pct.
-        Missing values are filled with 0.0 and rows are aligned to city_info index.
+        """
+        Assemble wide city x service feature matrix for ML.
         """
         if self.city_info is None:
             raise RuntimeError("City info is not loaded.")
@@ -465,6 +463,7 @@ class UrbanFunctionCalculator:
                 {
                     f"{service_name}__provision_pct": pd.to_numeric(df["provision_pct"], errors="coerce"),
                     f"{service_name}__external_pct": pd.to_numeric(df["external_pct"], errors="coerce"),
+                    # f"{service_name}__external_pct": pd.to_numeric(df["self_supply_pct"], errors="coerce"),
                 },
                 index=df.index,
             )
@@ -505,7 +504,7 @@ class UrbanFunctionCalculator:
             ) from exc
 
         X = self._build_city_feature_matrix()
-        X = pd.concat([X, self.city_info['population']], axis=1)
+        # X = pd.concat([X, self.city_info['population']], axis=1)
         self.X = X
         if X.shape[0] < 2 or X.shape[1] < 2:
             raise RuntimeError("Not enough data to compute ML features.")
@@ -695,7 +694,12 @@ class UrbanFunctionCalculator:
                 demand = aligned["demand"]
                 served = aligned["demand_within"]
                 external = aligned["demand_without"]
-
+                capacity = aligned["capacity"]
+                capacity_left = aligned["capacity_left"]
+                population = aligned['population']
+                exported_to_others = ((capacity - demand).clip(lower=0.0) - capacity_left).clip(lower=0.0)
+                exported_pct = (exported_to_others / population) * 100.0
+                self_supply_pct = (np.minimum(demand, capacity) / population) * 100.0
                 mask = demand > 0
                 # Default to 0.0 so missing demand doesn't produce NaN -> null in JSON
                 provision_pct = pd.Series(0.0, index=city_ids, dtype=float)
@@ -714,6 +718,9 @@ class UrbanFunctionCalculator:
                         "served_population": served,
                         "external_demand": external,
                         "external_pct": external_pct,
+                        "exported_pct": exported_pct,
+                        # "self_supply": self_supply,
+                        "self_supply_pct": self_supply_pct,
                     },
                     index=city_ids,
                 )
