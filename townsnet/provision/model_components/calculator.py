@@ -60,7 +60,7 @@ class UrbanFunctionCalculator:
             "city_id",
             "Название",
             "Население",
-            "Опорный пункт",
+            # "Опорный пункт",
             "Потенциальный опорный пункт",
             "Лучшая градообразующая функция",
             "Лучшая градообразующая функция, чел",
@@ -93,7 +93,7 @@ class UrbanFunctionCalculator:
         data = GeoDfSchema.validate(data)
         prepared = gpd.GeoDataFrame(index=data.index, geometry=data['geometry'], crs=data.crs)
         prepared["city_name"] = data["name"].astype(str)
-        prepared["is_anchor"] = data["is_city"].astype(bool)
+        # prepared["is_anchor"] = data["is_city"].astype(bool)
         prepared["population"] = _ensure_numeric(data["population"]).fillna(0.0)
 
         self.city_info = prepared
@@ -414,7 +414,7 @@ class UrbanFunctionCalculator:
                 "service_provision_index": ml_data.loc[cluster_mask, "service_provision_index"],
                 "external_supply": external_supply.loc[cluster_mask],
                 "population": self.city_info.loc[cluster_mask, "population"],
-                "is_anchor": self.city_info.loc[cluster_mask, "is_anchor"],
+                # "is_anchor": self.city_info.loc[cluster_mask, "is_anchor"],
             }
         ).sort_values("anomaly_score", ascending=False)
 
@@ -462,7 +462,7 @@ class UrbanFunctionCalculator:
                         "anomaly_score": float(summary.loc[city_id, "anomaly_score"]),
                         "external_supply": float(summary.loc[city_id, "external_supply"]),
                         "service_provision_index": float(summary.loc[city_id, "service_provision_index"]),
-                        "is_anchor": bool(summary.loc[city_id, "is_anchor"]),
+                        # "is_anchor": bool(summary.loc[city_id, "is_anchor"]),
                         "analytical_pop": bool(summary.loc[city_id, "analytical_pop"]),
                         "cluster_mean_external_supply": float(cluster_mean["external_supply"]),
                         "cluster_mean_service_provision_index": float(cluster_mean["service_provision_index"]),
@@ -476,7 +476,7 @@ class UrbanFunctionCalculator:
             (external_supply >= external_supply.quantile(pop_provision_quantile))
             & (ml_data["service_provision_index"] >= ml_data["service_provision_index"].quantile(pop_provision_quantile))
             & (ml_data["anomaly_score_in_cluster"] >= ml_data["anomaly_score_in_cluster"].quantile(pop_anomaly_quantile))
-            & (~ml_data["is_anchor"])
+            # & (~ml_data["is_anchor"])
         ]
 
         typical_low_cities: List[Dict[str, object]] = []
@@ -991,14 +991,14 @@ class UrbanFunctionCalculator:
 
 
             population = int(round(float(city_row.get("population", 0.0) or 0.0)))
-            is_anchor = bool(city_row.get("is_anchor", False))
+            # is_anchor = bool(city_row.get("is_anchor", False))
             # Город считается потенциальным опорным, только если:
             #   - он сам не помечен как опорный;
             #   - он действительно обслуживает другие города (есть внешний объём);
             #   - у него есть хотя бы одна группа, где обслуживается своё население.
             potential_anchor = bool(
-                (not is_anchor)
-                and external_supply.get(city_id, 0.0) > min_export_threshold
+                # (not is_anchor)
+                external_supply.get(city_id, 0.0) > min_export_threshold
                 and has_served_group
             )
             geometry = city_row.get("geometry")
@@ -1006,7 +1006,7 @@ class UrbanFunctionCalculator:
             profiles[int(city_id)] = {
                 "Название": str(city_row.get("city_name", city_id)),
                 "geometry": geometry,
-                "Опорный пункт": is_anchor,
+                # "Опорный пункт": is_anchor,
                 "Потенциальный опорный пункт": potential_anchor,
                 "Население": population,
                 "Сервисы: градообслуживающая функция": service_provision,
