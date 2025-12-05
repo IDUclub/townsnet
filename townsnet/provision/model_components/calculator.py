@@ -164,7 +164,7 @@ class UrbanFunctionCalculator:
     # Aggregation & export
     # ------------------------------------------------------------------ #
 
-    def build_profiles(self, min_export_threshold: int = 0) -> Dict[int, Dict[str, object]]:
+    def build_profiles(self, min_export_threshold: int = 1000) -> Dict[int, Dict[str, object]]:
         """
         Aggregate service-level results into grouped city profiles with urban function metrics.
 
